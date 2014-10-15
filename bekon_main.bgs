@@ -1,0 +1,377 @@
+dim result
+dim endpoint
+dim in(50) # endpoint data in
+dim in_len
+dim out(20) # endpoint data out
+dim out_len
+
+dim custom_adv_data(9)
+
+const PACKET_SIZE = 20	#the maximum BT payload size
+const start_byte = $53	# S
+
+const SET_DATA_1 = $25	# %
+const SERIAL_LINE = $24	# $
+
+dim dat(2)
+dim data_len
+dim len_byte
+dim receiving
+dim command
+dim command_received
+
+dim data1(103)
+dim data1_len
+dim data1_send
+dim data1_left
+dim data1_curr_len
+dim data1_rec_offset
+
+dim serial_left
+
+#dim data2(50)
+
+#dim data2_len
+#dim data2_send
+#dim data2_left
+#dim data2_curr_len
+
+# flexible procedure to display %02X byte arrays
+dim hex_buf(3) # [0,1] = ASCII hex representation, [2]=separator
+dim hex_index # byte array index
+procedure print_hex_bytes(my_endpoint, separator, reverse, b_length, b_data())
+	hex_buf(2:1) = separator
+	hex_index = 0
+	while hex_index < b_length
+		if reverse = 0 then
+			hex_buf(0:1) = (b_data(hex_index:1)/$10) + 48 + ((b_data(hex_index:1)/$10)/10*7)
+			hex_buf(1:1) = (b_data(hex_index:1)&$f) + 48 + ((b_data(hex_index:1)&$f )/10*7)
+		else
+			hex_buf(0:1) = (b_data(b_length - hex_index - 1:1)/$10) + 48 + ((b_data(b_length - hex_index - 1:1)/$10)/10*7)
+			hex_buf(1:1) = (b_data(b_length - hex_index - 1:1)&$f) + 48 + ((b_data(b_length - hex_index - 1:1)&$f )/10*7)
+		end if
+		if separator > 0 && hex_index < b_length - 1 then
+			call system_endpoint_tx(my_endpoint, 3, hex_buf(0:3))
+		else
+			call system_endpoint_tx(my_endpoint, 2, hex_buf(0:2))
+		end if
+		hex_index = hex_index + 1
+	end while
+end
+
+event system_boot(major, minor, patch, build, ll_version, protocol_version, hw)
+	
+	endpoint = system_endpoint_uart1
+	call system_endpoint_tx(endpoint, 15, "BLE booted up\n\r")
+	
+	#data1_len = 56
+	#data2_len = 59
+	
+	#data1(0:data1_len) = "this is the default data stored in the first data field."
+	#data2(0:data2_len) = "in here we have the second preset data. its crap im tired.."
+
+    #call system_endpoint_set_watermarks(endpoint, 0, 0) # disable watermarks
+    
+	call system_endpoint_set_watermarks(endpoint, 1, $ff) # set RX watermark
+	
+	#TODO: something with custom adv
+    #custom_adv_data(0:1) = $04 #Length of adv data
+    #custom_adv_data(1:1) = $ff #AD type is Manufacturer Specific Data AD type
+    #custom_adv_data(2:1) = $47 #Bluegiga Company Identifier Code - octet 2
+    #custom_adv_data(3:1) = $00 #Bluegiga Company Identifier Code - octet 1
+    #custom_adv_data(4:1) = $e5 #Custom data indicating other side that we support spp_over_ble - or use line below
+    #custom_adv_data(4:1) = $e6 #Custom data indicating a remote bled112 to reboot in dfu mode
+    #custom_adv_data(5:1) = $03 #Length of next adv data
+    #custom_adv_data(6:1) = $09 # AD type is Complete local name
+    #custom_adv_data(7:1) = $45 #E
+    #custom_adv_data(8:1) = $54 #T
+    #call gap_set_adv_data(1, 9, custom_adv_data(0:9)) #overwrites the friendly name in gatt.xml with ET but also allows closed system's companion module-dongle to automatically connect
+    call gap_set_mode(gap_user_data, gap_undirected_connectable)
+    
+	
+end
+
+event connection_status(connection, flags, address, address_type, conn_interval, timeout, latency, bonding)
+    
+    call system_endpoint_tx(endpoint, 17, "Connected to: ")
+	call print_hex_bytes(endpoint, ":", 1, 6, address(0:6))
+	call system_endpoint_tx(endpoint, 2, "\n\r")
+    #call system_endpoint_tx(endpoint, 15, "Connection id: ")
+	#call print_hex_bytes(endpoint, ":", 1, 1, connection)
+    #call system_endpoint_tx(endpoint, 1, connection)
+    #call system_endpoint_tx(endpoint, 2, "\n\r")	
+    #call system_endpoint_tx(endpoint, 26, "Connection interval: ")
+	#call print_hex_bytes(endpoint, ":", 1, 2, conn_interval)
+    #call system_endpoint_tx(endpoint, 2, conn_interval)
+    #call system_endpoint_tx(endpoint, 2, "\n\r")
+    
+end
+
+event attributes_status(handle, flags)
+
+    if (handle = xgatt_serial) && (flags = 2) then
+    
+		call system_endpoint_tx(endpoint, 52, "Local CCC set by remote side to start indications.\n\r")
+		call system_endpoint_tx(endpoint, 38, "Transparent data exchange can start.\n\r")
+	
+		#setting rx watermark was here
+    
+    end if
+
+end
+
+event system_endpoint_watermark_rx(curr_endpoint, size)
+#TODO: add command support (change data to be sent)
+    call system_endpoint_set_watermarks(endpoint, 0, $ff) # disable RX watermark
+	
+	#check for startbyte if not receiving and set a flag if true
+	if receiving != 1 then
+		call system_endpoint_rx(endpoint, 1)(result, in_len, dat(0:1))
+		dat(1:1) = 0 #?
+	end if
+	
+	#received a command, get it and the length
+	if dat(0:1) = start_byte && receiving != 1 then
+		call system_endpoint_rx(endpoint, 2)(result, in_len, dat(0:2))
+		data_len = dat(0:1)
+		command = dat(1:1)
+		command_received = 1
+		call system_endpoint_tx(endpoint, 22, "start byte received.\n\r")
+		call system_endpoint_tx(endpoint, 12, "data_len: 0x")
+		call print_hex_bytes(endpoint, " ", 0, 1, data_len)
+		call system_endpoint_tx(endpoint, 13, "\n\rcommand: 0x")
+		call print_hex_bytes(endpoint, " ", 0, 1, command)
+		call system_endpoint_tx(endpoint, 2, "\n\r")
+	end if
+	
+
+	
+	#receiving data1
+	if command = SET_DATA_1 && receiving = 1 then
+		call system_endpoint_rx(endpoint, size)(result, in_len, in(0:in_len))
+		data1(data1_rec_offset:in_len) = in(0:in_len)
+		
+		call system_endpoint_tx(endpoint, 10, "received: ")
+		call system_endpoint_tx(endpoint, in_len, data1(data1_rec_offset:in_len))
+		call system_endpoint_tx(endpoint, 2, "\n\r")		
+		
+		data1_rec_offset = data1_rec_offset + in_len
+		
+		call system_endpoint_set_watermarks(endpoint, 1, $ff) # set RX watermark
+	end if
+	
+	#receiving first part of data1
+	if command_received = 1 && command = SET_DATA_1 then
+		command_received = 0
+		receiving = 1
+		data1_len = (data_len - 1)
+		call system_endpoint_rx(endpoint, size-3)(result, in_len, in(0:in_len))
+		data1(0:in_len) = in(0:in_len)
+		data1_rec_offset = in_len
+		
+		call system_endpoint_tx(endpoint, 9, "lengths: ")
+		call print_hex_bytes(endpoint, " ", 0, 1, data1_rec_offset)
+		call print_hex_bytes(endpoint, " ", 0, 1, data_len)
+		call print_hex_bytes(endpoint, " ", 0, 1, data1_len)
+		call system_endpoint_tx(endpoint, 2, "\n\r")		
+		
+		call system_endpoint_tx(endpoint, 16, "first received: ")
+		call system_endpoint_tx(endpoint, in_len, data1(0:in_len))
+		call system_endpoint_tx(endpoint, 2, "\n\r")
+
+		
+		call system_endpoint_set_watermarks(endpoint, 1, $ff) # set RX watermark
+	end if
+	
+	#received all chunks of data1
+	if data1_rec_offset >= data1_len && command = SET_DATA_1 then
+		command = 0
+		receiving = 0
+		data1_rec_offset = -1
+		#call system_endpoint_tx(endpoint, 42, "received all data1 chunks. data1 is now:\n\r")
+		#call system_endpoint_tx(endpoint, data1_len/2, data1(0:data1_len))
+		#call system_endpoint_tx(endpoint, data1_len/2, data1(data1_len/2:data1_len/2))
+		#call system_endpoint_tx(endpoint, 2, "\n\r")
+		
+		call system_endpoint_tx(endpoint, 22, "stuff bricks here...\n\r")
+	end if
+	
+	#perform actions depending on the action variable
+	
+#	if receiving != 1 then
+#		in_len = size - 3
+#	else
+#		in_len = size
+#	end if
+	
+#	if command_received = 1 && command = SERIAL_LINE && in_len > 20 then
+#		in_len = 20
+#	end if
+	
+	#send directly from uart
+#	if command = SERIAL_LINE && receiving = 1 then
+#		call system_endpoint_rx(endpoint, in_len)(result, in_len, in(0:in_len))
+#		call attributes_write(xgatt_serial, 0, in_len, in(0:in_len))
+#		serial_left = serial_left - in_len
+#	end if	
+	
+	#receiving first part of serial line
+#	if command_received = 1 && command = SERIAL_LINE then
+#		command_received = 0
+#		receiving = 1
+#		serial_left = data_len-1
+#		call system_endpoint_rx(endpoint, in_len)(result, in_len, in(0:in_len))
+#		call attributes_write(xgatt_serial, 0, in_len, in(0:in_len))
+#		serial_left = serial_left - in_len
+#	end if
+	
+#	if serial_left = 0 && command = SERIAL_LINE then
+#		command = 0
+#		receiving = 0
+#	end if
+	
+    
+    #call system_endpoint_rx(endpoint, in_len)(result, in_len, in(0:in_len))
+	
+	#call system_endpoint_tx(endpoint, in_len, in(0:in_len))
+	#call system_endpoint_tx(endpoint, 2, "\n\r")
+	#call attributes_write(xgatt_serial, 0, in_len, in(0:in_len))
+
+end
+
+event attclient_indicated(connection, handle)
+
+	call system_endpoint_tx(endpoint, 13, "indicated..\n\r")
+    
+	if handle = xgatt_serial then
+        call system_endpoint_set_watermarks(endpoint, 1, 0) # set RX watermark
+    end if
+
+	if data1_left < PACKET_SIZE && handle = xgatt_data1 then
+		data1_curr_len = data1_left
+	end if
+	
+	if data1_left >= PACKET_SIZE && handle = xgatt_data1 then
+		data1_curr_len = PACKET_SIZE
+	end if
+	
+    if handle = xgatt_data1 && data1_send then
+		#send more data while there is data to be sent
+		call system_endpoint_tx(endpoint, 9, "sending: ")
+		call system_endpoint_tx(endpoint, data1_curr_len, data1((data1_len - data1_left):data1_curr_len))
+		call system_endpoint_tx(endpoint, 2, "\n\r")
+		call attributes_write(xgatt_data1, (data1_len - data1_left), data1_curr_len, data1(0:data1_len))
+		data1_left = data1_left - data1_curr_len
+	end if
+	
+	if data1_left = 0 && handle = xgatt_data1 then
+		data1_send = 0
+	end if
+
+	#data2 stuff
+#	if data2_left < PACKET_SIZE && handle = xgatt_data2 then
+#		data2_curr_len = data2_left
+#	end if
+	
+#	if data2_left >= PACKET_SIZE && handle = xgatt_data2 then
+#		data2_curr_len = PACKET_SIZE
+#	end if
+	
+#    if handle = xgatt_data2 && data2_send then
+		#send more data while there is data to be sent
+#		call system_endpoint_tx(endpoint, 9, "sending: ")
+#		call system_endpoint_tx(endpoint, data2_curr_len, data2((data2_len - data2_left):data2_curr_len))
+#		call system_endpoint_tx(endpoint, 2, "\n\r")
+#		call attributes_write(xgatt_data2, (data2_len - data2_left), data2_curr_len, data2(0:data2_len))
+#		data2_left = data2_left - data2_curr_len
+#	end if
+	
+#	if data2_left = 0 && handle = xgatt_data2 then
+#		data2_send = 0
+#	end if	
+end
+
+event attributes_value(connection, reason, handle, offset, value_len, value_data)
+
+    if handle = xgatt_serial then
+        out(0:value_len) = value_data(0:value_len)
+        out_len = value_len
+        call system_endpoint_set_watermarks(endpoint, $ff, out_len) # set TX watermark
+    end if
+	
+	if handle = xgatt_data1 && data1_send = 0 then
+		data1_send = 1
+		call attributes_user_write_response(0, 0)
+		call system_endpoint_tx(endpoint, 18, "data1 requested.\n\r")
+	end if
+	
+	#received data1 request
+	if data1_len < PACKET_SIZE && handle = xgatt_data1 then
+		data1_left = 0
+		data1_send = 0
+		data1_curr_len = data1_len
+	end if
+	
+	if data1_len >= PACKET_SIZE && handle = xgatt_data1 then
+		data1_left = data1_len - PACKET_SIZE
+		data1_curr_len = PACKET_SIZE
+		data1_send = 1
+	end if
+	
+	if handle = xgatt_data1 then
+		call system_endpoint_tx(endpoint, 9, "sending: ")
+		call system_endpoint_tx(endpoint, data1_curr_len, data1(0:data1_curr_len))
+		call system_endpoint_tx(endpoint, 2, "\n\r")
+		call attributes_write(xgatt_data1, 0, data1_curr_len, data1(0:data1_len))
+	end if
+	
+	#data2 stuff
+#	if handle = xgatt_data2 && data2_send = 0 then
+#		data2_send = 1
+#		call attributes_user_write_response(0, 0)
+#	end if
+	
+	#received data2 request
+#	if data2_len < PACKET_SIZE && handle = xgatt_data2 then
+#		data2_left = 0
+#		data2_send = 0
+#		data2_curr_len = data2_len
+#	end if
+	
+#	if data2_len >= PACKET_SIZE && handle = xgatt_data2 then
+#		data2_left = data2_len - PACKET_SIZE
+#		data2_curr_len = PACKET_SIZE
+#		data2_send = 1
+#	end if
+	
+#	if handle = xgatt_data2 then
+#		call attributes_write(xgatt_data2, 0, data2_curr_len, data2(0:data2_len))
+#	end if
+	
+end
+
+event system_endpoint_watermark_tx(curr_endpoint, size)
+
+    if curr_endpoint = endpoint then
+        call system_endpoint_set_watermarks(endpoint, $ff, 0) # disable TX watermark
+        call system_endpoint_tx(endpoint, out_len, out(0:out_len))
+        call attributes_user_write_response(0, 0)
+    end if
+    
+end
+
+event connection_disconnected(connection, reason)
+    
+	call system_endpoint_tx(endpoint, 23, "Disconnected. Conn id: ")
+	call print_hex_bytes(endpoint, ":", 1, 1, connection)
+	call system_endpoint_tx(endpoint, 1, "\n")
+    call system_endpoint_tx(endpoint, 17, "Reason code: ")
+    call system_endpoint_tx(endpoint, 2, reason)
+    call system_endpoint_tx(endpoint, 1, "\n")
+
+    call system_endpoint_set_watermarks(endpoint, 0, 0) # disable watermarks
+    
+    #call gap_set_adv_data(1, 9, custom_adv_data(0:9))
+    call gap_set_mode(gap_user_data, gap_undirected_connectable)
+    
+end

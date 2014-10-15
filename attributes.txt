@@ -1,0 +1,3 @@
+xgatt_serial 6
+xgatt_data1 10
+xgatt_data2 14
