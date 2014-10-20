@@ -87,14 +87,14 @@ event connection_status(connection, flags, address, address_type, conn_interval,
     
 	#call connection_get_rssi(connection)(connection_handle,rssi)
     call system_endpoint_tx(endpoint, 18, "ble connected to: ")
-	call print_hex_bytes(endpoint, ":", 1, 6, address(0:6))
+	call print_hex_bytes(endpoint, ":", 0, 6, address(0:6))
 	call system_endpoint_tx(endpoint, 2, "\r\n")
 	
 	#call system_endpoint_set_watermarks(endpoint, 3, $ff) # set RX watermark to at least 3 bytes
 	
 	#call system_endpoint_tx(endpoint, 15, ", rssi (hex): -")
 	#rssi = 256 - rssi #twos complement, now the negative values are positive
-	#call print_hex_bytes(endpoint, ":", 1, 1, rssi)
+	#call print_hex_bytes(endpoint, ":", 0, 1, rssi)
 	#call system_endpoint_tx(endpoint, 2, "\r\n")
 	
     #call system_endpoint_tx(endpoint, 26, "\n\r++ Connection interval: ")
@@ -106,41 +106,51 @@ end
 event attributes_status(handle, flags)
 
     if (handle = xgatt_serial) && (flags = 2) then
-    
        call system_endpoint_tx(endpoint, 22, "ble serial_can_start\r\n")
-       #call system_endpoint_tx(endpoint, 46, "\n\r++ Transparent data exchange can start ++\n\n\r")
-
        call system_endpoint_set_watermarks(endpoint, watermark_len, $ff) # set RX watermark to at least 3 bytes
-    
     end if
 
+	if (handle = xgatt_serial) && (flags = 0) then
+       call system_endpoint_tx(endpoint, 20, "ble serial_stopped\r\n")
+       call system_endpoint_set_watermarks(endpoint, 0, $ff) # disable RX watermark
+    end if
+	
+	if (handle = xgatt_data1) && (flags = 2) then
+		call system_endpoint_set_watermarks(endpoint, watermark_len, $ff) # set RX watermark to at least 3 bytes
+		call system_endpoint_tx(endpoint, 9, "ble -D1\r\n")
+	end if
 end
 
 event system_endpoint_watermark_rx(curr_endpoint, size)
 	
 	#call system_endpoint_tx(endpoint, 6, "size: ")
-	#call print_hex_bytes(endpoint, ":", 1, 1, size)
+	#call print_hex_bytes(endpoint, ":", 0, 1, size)
 	#call system_endpoint_tx(endpoint, 2, "\r\n")
 
-    in_len = size
-    if in_len > 20 then
-       in_len = 20
-    end if
+    #in_len = size
+    #if in_len > 20 then
+    #   in_len = 20
+    #end if
+	
+	if receiving = 0 then
+		in_len = 3
+	end if
+	
     call system_endpoint_set_watermarks(endpoint, 0, $ff) # disable RX watermark
     call system_endpoint_rx(endpoint, in_len)(result, in_len, in(0:in_len))
 
 	#call system_endpoint_tx(endpoint, 8, "in_len: ")
-	#call print_hex_bytes(endpoint, ":", 1, 1, in_len)
+	#call print_hex_bytes(endpoint, ":", 0, 1, in_len)
 	#call system_endpoint_tx(endpoint, 2, ", ")
 	#call system_endpoint_tx(endpoint, in_len, in(0:in_len))
 	#call system_endpoint_tx(endpoint, 2, "\r\n")
 	#call system_endpoint_tx(endpoint, 10, "data_len: ")
-	#call print_hex_bytes(endpoint, ":", 1, 1, data_len)
+	#call print_hex_bytes(endpoint, ":", 0, 1, data_len)
 	#call system_endpoint_tx(endpoint, 2, "\r\n")
 
 	received_len = received_len + in_len
 	#call system_endpoint_tx(endpoint, 14, "received_len: ")
-	#call print_hex_bytes(endpoint, ":", 1, 1, received_len)
+	#call print_hex_bytes(endpoint, ":", 0, 1, received_len)
 	#call system_endpoint_tx(endpoint, 2, "\r\n")
 	
 	stop = 0
@@ -148,19 +158,18 @@ event system_endpoint_watermark_rx(curr_endpoint, size)
 	if receiving = 0 && in(0:1) = START_BYTE then
 		data_len = in(1:1)
 		command = in(2:1)
-		watermark_len = 1
 		#call system_endpoint_tx(endpoint, 10, "data_len: ")
-		#call print_hex_bytes(endpoint, ":", 1, 1, data_len)
+		#call print_hex_bytes(endpoint, ":", 0, 1, data_len)
 		#call system_endpoint_tx(endpoint, 11, ", command: ")
 		#call system_endpoint_tx(endpoint, 1, command)
-		#all system_endpoint_tx(endpoint, 2, "\r\n")		
+		#call system_endpoint_tx(endpoint, 2, "\r\n")		
 		
 	end if
 	
-	if data_len > 61 && receiving = 0 then
+	if data_len > 60 && receiving = 0 then
 		ms = 1
 		#call system_endpoint_tx(endpoint, 4, "ms: ")
-		#call print_hex_bytes(endpoint, ":", 1, 1, ms)
+		#call print_hex_bytes(endpoint, ":", 0, 1, ms)
 		#call system_endpoint_tx(endpoint, 2, "\r\n")	
 	end if
 	
@@ -173,12 +182,22 @@ event system_endpoint_watermark_rx(curr_endpoint, size)
 	if command = DATA2 then
 		xgatt = xgatt_data2
 	end if
+
+	if data_len > 20 && receiving = 0 && command != 0 then
+		watermark_len = 20
+		in_len = 20
+	end if
+	if data_len <= 20 && receiving = 0 && command != 0 then
+		watermark_len = data_len
+		in_len = data_len
+	end if
+	
 	if receiving = 0 && command != 0 then
+		received_len = 0
 		receiving = 1
 		stop = 1
-		data_len = data_len - (in_len-3)
-	    call attributes_write(xgatt, 0, in_len-3, in(3:in_len-3))
-    end if
+		call system_endpoint_set_watermarks(endpoint, watermark_len, $ff) # set RX watermark
+	end if
 	
 	if receiving = 1 && data_len > 20 && stop = 0 then
 		stop = 1
@@ -205,15 +224,15 @@ event attclient_indicated(connection, handle)
 
 	if data_len != 0 && data_len <= 20 then
 		watermark_len = data_len
+		in_len = data_len
 	end if
 	
-	if (received_len > 63 && ms != 0) || data_len = 0 then
+	if (received_len >=  60 && ms != 0) || data_len = 0 then
 		received_len = 0
-		call system_endpoint_tx(endpoint, 3, "x\r\n") # TODO: change it to something more sophisticated
+		call system_endpoint_tx(endpoint, 7, "ble x\r\n") # TODO: change it to something more sophisticated
 	end if	
 	
 	if handle = xgatt then
-		#stop = 0
 		#call system_endpoint_tx(endpoint, 11, "indicated\r\n")
 		call system_endpoint_set_watermarks(endpoint, watermark_len, $ff) # set RX watermark
     end if
