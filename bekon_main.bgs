@@ -14,6 +14,8 @@ const START_BYTE = $53	# S
 const SERIAL = $24	# $
 const DATA1 = $21	# !
 const DATA2 = $40	# @
+const DFU = $7e
+
 dim receiving
 dim data_len
 dim command
@@ -22,6 +24,10 @@ dim stop
 dim watermark_len
 dim received_len
 dim ms #multiple send
+
+
+#TODO: read from and write data to presistant storage (flash)  
+
 
 # flexible procedure to display %02X byte arrays
 dim hex_buf(3) # [0,1] = ASCII hex representation, [2]=separator
@@ -46,6 +52,10 @@ procedure print_hex_bytes(my_endpoint, separator, reverse, b_length, b_data())
 	end while
 end
 
+event dfu_boot(version)
+	call system_endpoint_tx(endpoint, 19, "ble booted in dfu\r\n")
+end
+
 event system_boot(major, minor, patch, build, ll_version, protocol_version, hw)
     
     endpoint = system_endpoint_uart1
@@ -57,7 +67,8 @@ event system_boot(major, minor, patch, build, ll_version, protocol_version, hw)
     call system_endpoint_tx(endpoint, 12, "ble booted\r\n")
 
     call system_endpoint_set_watermarks(endpoint, 0, 0) # disable watermarks
-    
+    call system_endpoint_set_watermarks(endpoint, 3, $ff) # set RX watermark so that we can receive commands even before someone connects
+	
     custom_adv_data(0:1) = $04 #Length of adv data
     custom_adv_data(1:1) = $ff #AD type is Manufacturer Specific Data AD type
     custom_adv_data(2:1) = $47 #Bekonz Company Identifier Code - octet 2
@@ -89,7 +100,7 @@ event connection_status(connection, flags, address, address_type, conn_interval,
     call system_endpoint_tx(endpoint, 18, "ble connected to: ")
 	call print_hex_bytes(endpoint, ":", 0, 6, address(0:6))
 	call system_endpoint_tx(endpoint, 2, "\r\n")
-	
+
 	#call system_endpoint_set_watermarks(endpoint, 3, $ff) # set RX watermark to at least 3 bytes
 	
 	#call system_endpoint_tx(endpoint, 15, ", rssi (hex): -")
@@ -154,6 +165,21 @@ event system_endpoint_watermark_rx(curr_endpoint, size)
 	#call system_endpoint_tx(endpoint, 2, "\r\n")
 	
 	stop = 0
+	
+	if receiving = 1 && command = DFU && in(0:1) = $00 && in(1:1) = $01 then
+		#call system_endpoint_tx(endpoint, 10, "boot dfu\r\n")
+		call dfu_reset(1)
+	end if
+	
+	if receiving = 0 && in(0:1) = $00 && in(1:1) = $01 && in(2:1) = $09 then	#we will probably be receiving dfu_boot command
+		receiving = 1
+		command = DFU
+		data_len = 2
+		watermark_len = 2
+		in_len = 2
+		stop = 1
+		call system_endpoint_set_watermarks(endpoint, watermark_len, $ff) # set RX watermark
+	end if	
 	
 	if receiving = 0 && in(0:1) = START_BYTE then
 		data_len = in(1:1)

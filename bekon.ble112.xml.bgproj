@@ -5,5 +5,6 @@
     <gatt in="gatt.xml" />
     <hardware in="bekon_hardware.xml" />
     <script in="bekon_main.bgs" />
+	<boot fw="bootuart" />
     <image out="out.hex" />
 </project>
