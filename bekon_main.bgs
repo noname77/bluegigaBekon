@@ -1,3 +1,4 @@
+# Have to  declare variables first
 dim result
 dim endpoint
 dim in(20) # endpoint data in
@@ -10,12 +11,14 @@ dim connection_handle
 
 dim custom_adv_data(14)
 
-const START_BYTE = $53	# S
-const SERIAL = $24	# $
-const DATA1 = $21	# !
-const DATA2 = $40	# @
+# constants for serial interpreter
+const START_BYTE = $53	# S - each command starts with a Start byte
+const SERIAL = $24		# $ - Serial data will folow
+const DATA1 = $21		# ! - Characteristic 1 data will follow
+const DATA2 = $40		# @ - Characteristic 2 data will follow
 const DFU = $7e
 
+# command processor variables
 dim receiving
 dim data_len
 dim command
@@ -52,6 +55,7 @@ procedure print_hex_bytes(my_endpoint, separator, reverse, b_length, b_data())
 	end while
 end
 
+# TODO: not sure if need that (prob not)
 event dfu_boot(version)
 	call system_endpoint_tx(endpoint, 19, "ble booted in dfu\r\n")
 end
@@ -86,18 +90,15 @@ event system_boot(major, minor, patch, build, ll_version, protocol_version, hw)
 	custom_adv_data(13:1) = $31 #1
     call gap_set_adv_data(1, 14, custom_adv_data(0:14)) #overwrites the friendly name in gatt.xml with ET but also allows closed system's companion module-dongle to automatically connect
     
-	#set data1 to something long
-	
-	call gap_set_mode(gap_general_discoverable, gap_undirected_connectable)
-    
-	
-	
+	call gap_set_mode(gap_general_discoverable, gap_undirected_connectable)	# start advertising
 end
 
 event connection_status(connection, flags, address, address_type, conn_interval, timeout, latency, bonding)
     
 	#call connection_get_rssi(connection)(connection_handle,rssi)
-    call system_endpoint_tx(endpoint, 18, "ble connected to: ")
+    
+	# let uart know that user connected
+	call system_endpoint_tx(endpoint, 18, "ble connected to: ")
 	call print_hex_bytes(endpoint, ":", 0, 6, address(0:6))
 	call system_endpoint_tx(endpoint, 2, "\r\n")
 
@@ -116,40 +117,47 @@ end
 
 event attributes_status(handle, flags)
 
+	# indications enabled so we can start receiving data from uart
     if (handle = xgatt_serial) && (flags = 2) then
        call system_endpoint_tx(endpoint, 22, "ble serial_can_start\r\n")
        call system_endpoint_set_watermarks(endpoint, watermark_len, $ff) # set RX watermark to at least 3 bytes
     end if
 
+	# indications disabled, stop receiving
 	if (handle = xgatt_serial) && (flags = 0) then
        call system_endpoint_tx(endpoint, 20, "ble serial_stopped\r\n")
        call system_endpoint_set_watermarks(endpoint, 0, $ff) # disable RX watermark
     end if
 	
+	# data1 requested (currently through subscribing to indications for simplicity) 
 	if (handle = xgatt_data1) && (flags = 2) then
 		call system_endpoint_set_watermarks(endpoint, watermark_len, $ff) # set RX watermark to at least 3 bytes
-		call system_endpoint_tx(endpoint, 9, "ble -D1\r\n")
+		call system_endpoint_tx(endpoint, 9, "ble -D1\r\n") # send command to Contiki requesting data1
 	end if
 end
 
 event system_endpoint_watermark_rx(curr_endpoint, size)
 	
+	# debug
 	#call system_endpoint_tx(endpoint, 6, "size: ")
 	#call print_hex_bytes(endpoint, ":", 0, 1, size)
 	#call system_endpoint_tx(endpoint, 2, "\r\n")
 
+	# TODO: artifacts ? can prob get rid of that
     #in_len = size
     #if in_len > 20 then
     #   in_len = 20
     #end if
 	
+	# if we are not currently receiving, check the header first (3 bytes long) 
 	if receiving = 0 then
 		in_len = 3
 	end if
 	
     call system_endpoint_set_watermarks(endpoint, 0, $ff) # disable RX watermark
-    call system_endpoint_rx(endpoint, in_len)(result, in_len, in(0:in_len))
+    call system_endpoint_rx(endpoint, in_len)(result, in_len, in(0:in_len))	# put the received data into a buffer we can access
 
+	# debug
 	#call system_endpoint_tx(endpoint, 8, "in_len: ")
 	#call print_hex_bytes(endpoint, ":", 0, 1, in_len)
 	#call system_endpoint_tx(endpoint, 2, ", ")
@@ -160,12 +168,15 @@ event system_endpoint_watermark_rx(curr_endpoint, size)
 	#call system_endpoint_tx(endpoint, 2, "\r\n")
 
 	received_len = received_len + in_len
+	# debug
 	#call system_endpoint_tx(endpoint, 14, "received_len: ")
 	#call print_hex_bytes(endpoint, ":", 0, 1, received_len)
 	#call system_endpoint_tx(endpoint, 2, "\r\n")
 	
+	
 	stop = 0
 	
+	# if received firmware update command - boot into dfu 
 	if receiving = 1 && command = DFU && in(0:1) = $00 && in(1:1) = $01 then
 		#call system_endpoint_tx(endpoint, 10, "boot dfu\r\n")
 		call dfu_reset(1)
@@ -181,9 +192,12 @@ event system_endpoint_watermark_rx(curr_endpoint, size)
 		call system_endpoint_set_watermarks(endpoint, watermark_len, $ff) # set RX watermark
 	end if	
 	
+	# new command received
 	if receiving = 0 && in(0:1) = START_BYTE then
-		data_len = in(1:1)
-		command = in(2:1)
+		data_len = in(1:1)	# load the data length
+		command = in(2:1)	# load the command
+		
+		# debug
 		#call system_endpoint_tx(endpoint, 10, "data_len: ")
 		#call print_hex_bytes(endpoint, ":", 0, 1, data_len)
 		#call system_endpoint_tx(endpoint, 11, ", command: ")
@@ -192,13 +206,17 @@ event system_endpoint_watermark_rx(curr_endpoint, size)
 		
 	end if
 	
+	# set flag if the data requires 'multiple sends'
 	if data_len > 60 && receiving = 0 then
 		ms = 1
+		
+		# debug
 		#call system_endpoint_tx(endpoint, 4, "ms: ")
 		#call print_hex_bytes(endpoint, ":", 0, 1, ms)
 		#call system_endpoint_tx(endpoint, 2, "\r\n")	
 	end if
 	
+	# check the characteristic we'll be writing to
 	if command = SERIAL then
 		xgatt = xgatt_serial
 	end if
@@ -209,15 +227,18 @@ event system_endpoint_watermark_rx(curr_endpoint, size)
 		xgatt = xgatt_data2
 	end if
 
+	# use the maximum BLE payload if there is still data to be received through uart
 	if data_len > 20 && receiving = 0 && command != 0 then
 		watermark_len = 20
 		in_len = 20
 	end if
+	# will be receiving last chunk, so make sure we read only so many data bytes
 	if data_len <= 20 && receiving = 0 && command != 0 then
 		watermark_len = data_len
 		in_len = data_len
 	end if
 	
+	# we can start processing the commands
 	if receiving = 0 && command != 0 then
 		received_len = 0
 		receiving = 1
@@ -248,16 +269,19 @@ end
 
 event attclient_indicated(connection, handle)
 
+	# second last chunk reception indicated, make sure we try read from uart only as much as there is left
 	if data_len != 0 && data_len <= 20 then
 		watermark_len = data_len
 		in_len = data_len
 	end if
 	
+	# there is a 64 byte buffer that we cant overfill, this takes care of notifying Contiki it can send more data 
 	if (received_len >=  60 && ms != 0) || data_len = 0 then
 		received_len = 0
 		call system_endpoint_tx(endpoint, 7, "ble x\r\n") # TODO: change it to something more sophisticated
 	end if	
 	
+	# the client has received data, we can read more from uart
 	if handle = xgatt then
 		#call system_endpoint_tx(endpoint, 11, "indicated\r\n")
 		call system_endpoint_set_watermarks(endpoint, watermark_len, $ff) # set RX watermark
@@ -270,6 +294,7 @@ end
 
 event attributes_value(connection, reason, handle, offset, value_len, value_data)
 
+	# we received serial data from the client, pass it on to uart
     if handle = xgatt_serial then
         out(0:value_len) = value_data(0:value_len)
         out_len = value_len
@@ -283,7 +308,7 @@ event system_endpoint_watermark_tx(curr_endpoint, size)
 	if curr_endpoint = endpoint then
         call system_endpoint_set_watermarks(endpoint, $ff, 0) # disable TX watermark
         call system_endpoint_tx(endpoint, out_len, out(0:out_len))
-        call attributes_user_write_response(0, 0)
+        call attributes_user_write_response(0, 0)	# indicate reception
     end if
     
 end
@@ -291,13 +316,15 @@ end
 event connection_disconnected(conn, reas)
     
     call system_endpoint_tx(endpoint, 18, "ble disconnected\r\n")
-    #call system_endpoint_tx(endpoint, 17, "\r-- Reason code: ")
+    
+	#debug (not really working)
+	#call system_endpoint_tx(endpoint, 17, "\r-- Reason code: ")
     #call system_endpoint_tx(endpoint, 2, reas)
     #call system_endpoint_tx(endpoint, 4, " --\n")
 
     call system_endpoint_set_watermarks(endpoint, 0, 0) # disable watermarks
     
+	# client disconnected so start advertising again
     call gap_set_adv_data(1, 14, custom_adv_data(0:14))
     call gap_set_mode(gap_general_discoverable, gap_undirected_connectable)
-    
 end
